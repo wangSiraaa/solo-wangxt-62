@@ -12,7 +12,7 @@ export interface Guest {
   displayName: string;
   /** 同名区分序号（同一 displayName 内递增，仅展示用） */
   nameIndex: number;
-  rsvp: 'confirmed' | 'pending' | 'declined';
+  rsvp: 'confirmed' | 'pending' | 'declined' | 'walkin';
   isChild: boolean;
   /** 家庭/同行组 id，同组必须同桌（硬约束） */
   familyId: string | null;
@@ -86,6 +86,15 @@ export interface FloorPlan {
   zones: ForbiddenZone[];
 }
 
+/** 菜品。已出菜（servedAt 非空）是不可回滚的事实记录。 */
+export interface Dish {
+  id: string;
+  tableId: string; // 桌被撤后仍可能引用已不存在的桌（已出菜事实保留）
+  name: string;
+  servings: number;
+  servedAt: number | null;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -96,19 +105,13 @@ export interface Project {
   assignments: Assignment[];
   avoidPairs: AvoidPair[];
   preferences: ProximityPreference[];
+  catering: Dish[];
+  /** 布局版本：任何席位变更 +1。打印桌卡只认最新确认布局 */
+  layoutVersion: number;
   nextGuestSeq: number; // 稳定编号计数器
 }
 
 // ---------- 求解器协议 ----------
-
-export interface SolveRequest {
-  type: 'solve';
-  guests: Guest[];
-  tables: BanquetTable[];
-  assignments: Assignment[]; // 用于锁定
-  avoidPairs: AvoidPair[];
-  preferences: ProximityPreference[];
-}
 
 export interface SeatCost {
   guestId: string;
@@ -116,12 +119,26 @@ export interface SeatCost {
   cost: number; // 该宾客的偏好代价
 }
 
+/** 容量核算：未回复计入候选，临时到场计入实际需求 */
+export interface CapacityReport {
+  seats: number; // 剩余总席位
+  required: number; // 实际需求 = 已确认 + 临时到场
+  walkins: number; // 其中临时到场人数
+  pendingCandidates: number; // 候选（未回复）人数
+  pendingFit: boolean; // 排完实际需求后，剩余席位是否容得下全部候选
+}
+
 export interface SolveResult {
   type: 'result';
-  status: 'optimal' | 'feasible' | 'infeasible' | 'error';
+  status: 'optimal' | 'feasible' | 'infeasible' | 'error' | 'stale';
   message: string;
   assignments?: Assignment[]; // 未锁定部分的新方案（锁定项原样保留）
   totalPenalty?: number;
+  /** 换桌人数（字典序第一目标：最少换桌） */
+  moves?: number;
+  capacity?: CapacityReport;
+  /** 求解发起时的数据版本，用于过期拦截 */
+  baseVersion?: number;
   perGuestCost?: SeatCost[];
   /** 无解时给出参与冲突的约束描述，便于定位 */
   conflicts?: string[];

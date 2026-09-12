@@ -51,7 +51,7 @@ export function FloorCanvas() {
       return;
     }
     if (selectedGuest) {
-      if (selectedGuest.rsvp !== 'confirmed') return; // 未回复宾客不参与排座
+      if (selectedGuest.rsvp !== 'confirmed' && selectedGuest.rsvp !== 'walkin') return; // 未回复/婉拒不参与排座
       if (selectedGuest.isChild && !table.allowsChildren) return;
       assignSeat(selectedGuest.id, { tableId: table.id, seatIndex });
     }
@@ -136,7 +136,9 @@ export function FloorCanvas() {
                   : a.isChildSeat
                     ? '#7fc97f'
                     : '#4a90d9'
-                : selectedGuest && selectedGuest.rsvp === 'confirmed' && (!selectedGuest.isChild || t.allowsChildren)
+                : selectedGuest &&
+                    (selectedGuest.rsvp === 'confirmed' || selectedGuest.rsvp === 'walkin') &&
+                    (!selectedGuest.isChild || t.allowsChildren)
                   ? '#cfe6ff'
                   : '#eee';
               return (

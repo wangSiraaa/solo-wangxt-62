@@ -28,8 +28,13 @@ export interface GLPKModel {
 export interface BuiltModel {
   model: GLPKModel;
   varMeta: Record<string, { guestId: string; seat: SeatRef }>;
+  /** 换桌代价项：coef=1 表示该变量会把已入席宾客挪到别的桌（字典序第一目标） */
+  moveVars: { name: string; coef: number }[];
+  /** 原位保持项：已入席宾客离开原席位（含同桌换位）的 epsilon 代价，不干扰主目标 */
+  seatKeepVars: { name: string; coef: number }[];
   lockedAssignments: Assignment[];
   conflicts: string[]; // 建模阶段即可发现的硬冲突
+  stats: { seats: number; required: number; walkins: number; pending: number };
 }
 
 const GLP_LO = 1;
@@ -58,7 +63,11 @@ export function buildModel(
 ): BuiltModel {
   const conflicts: string[] = [];
   const byId = new Map(guests.map((g) => [g.id, g]));
-  const locked = assignments.filter((a) => a.locked && byId.get(a.guestId)?.rsvp === 'confirmed');
+  const isSeatable = (id: string) => {
+    const r = byId.get(id)?.rsvp;
+    return r === 'confirmed' || r === 'walkin';
+  };
+  const locked = assignments.filter((a) => a.locked && isSeatable(a.guestId));
   const lockedSeatKeys = new Set(locked.map((a) => `${a.seat.tableId}#${a.seat.seatIndex}`));
   const lockedByGuest = new Map(locked.map((a) => [a.guestId, a]));
 
@@ -75,8 +84,14 @@ export function buildModel(
     seenSeat.set(k, a.guestId);
   }
 
-  const seatable = guests.filter((g) => g.rsvp === 'confirmed');
+  const seatable = guests.filter((g) => g.rsvp === 'confirmed' || g.rsvp === 'walkin');
   const toAutoSeat = seatable.filter((g) => !lockedByGuest.has(g.id));
+  // 当前有效席位（桌仍存在）：用于“最少换桌”代价
+  const currentSeat = new Map(
+    assignments
+      .filter((a) => tables.some((t) => t.id === a.seat.tableId))
+      .map((a) => [a.guestId, a.seat] as const),
+  );
 
   // 容量粗检
   const totalSeats = tables.reduce((s, t) => s + t.capacity, 0);
@@ -131,6 +146,8 @@ export function buildModel(
   const binaries: string[] = [];
   const varMeta: BuiltModel['varMeta'] = {};
   const objVars: { name: string; coef: number }[] = [];
+  const moveVars: { name: string; coef: number }[] = [];
+  const seatKeepVars: { name: string; coef: number }[] = [];
   const subjectTo: GLPKModel['subjectTo'] = [];
 
   const tableById = new Map(tables.map((t) => [t.id, t]));
@@ -197,6 +214,14 @@ export function buildModel(
           coef += (d / 100) * p.weight;
         }
         objVars.push({ name, coef });
+        // 换桌代价：已入席宾客挪到别的桌记 1，原位/新入座记 0
+        const cur = currentSeat.get(g.id);
+        moveVars.push({ name, coef: cur && cur.tableId !== t.id ? 1 : 0 });
+        // 原位保持：离开原席位（含同桌换位）记 epsilon
+        seatKeepVars.push({
+          name,
+          coef: cur && (cur.tableId !== t.id || cur.seatIndex !== i) ? 0.001 : 0,
+        });
       }
     }
     const vars = guestVars.get(g.id) ?? [];
@@ -265,8 +290,8 @@ export function buildModel(
 
   // 明确避让：双方均自动排座时，同桌之和 <= 1
   for (const ap of avoidPairs) {
-    const aAuto = !lockedByGuest.has(ap.a) && byId.get(ap.a)?.rsvp === 'confirmed';
-    const bAuto = !lockedByGuest.has(ap.b) && byId.get(ap.b)?.rsvp === 'confirmed';
+    const aAuto = !lockedByGuest.has(ap.a) && isSeatable(ap.a);
+    const bAuto = !lockedByGuest.has(ap.b) && isSeatable(ap.b);
     if (!aAuto && !bAuto) continue;
     for (const t of tables) {
       const vars = [
@@ -291,7 +316,15 @@ export function buildModel(
       binaries,
     },
     varMeta,
+    moveVars,
+    seatKeepVars,
     lockedAssignments: locked,
     conflicts,
+    stats: {
+      seats: totalSeats,
+      required: seatable.length,
+      walkins: seatable.filter((g) => g.rsvp === 'walkin').length,
+      pending: guests.filter((g) => g.rsvp === 'pending').length,
+    },
   };
 }

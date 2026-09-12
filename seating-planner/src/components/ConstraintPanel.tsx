@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { estimatePenalty, useStore } from '../store';
 import { guestLabel, seatKey } from '../types';
+import { SwapChainPanel } from './SwapChainPanel';
+import { CateringPanel } from './CateringPanel';
 
 export function ConstraintPanel() {
   const {
@@ -11,6 +13,7 @@ export function ConstraintPanel() {
     removePreference,
     runSolver,
     applySolution,
+    dismissResult,
     undo,
     canUndo,
     clearAutoSnapshot,
@@ -129,10 +132,13 @@ export function ConstraintPanel() {
       </section>
 
       <section style={{ marginTop: 12 }}>
-        <h4>自动排座（GLPK / Web Worker）</h4>
+        <h4>自动排座 / 撤桌重排（GLPK / Web Worker）</h4>
+        <div style={{ fontSize: 12, color: '#777', marginBottom: 4 }}>
+          字典序目标：先最少换桌，再最小化偏好代价；锁定宾客绝不被挪动
+        </div>
         <div style={{ display: 'flex', gap: 6 }}>
           <button onClick={runSolver} disabled={solving}>
-            {solving ? '求解中…' : '运行自动排座'}
+            {solving ? '求解中…' : '运行重排'}
           </button>
           <button onClick={undo} disabled={!canUndo}>
             撤销手工操作
@@ -147,7 +153,7 @@ export function ConstraintPanel() {
               background:
                 lastSolve.status === 'infeasible'
                   ? '#fdecea'
-                  : lastSolve.status === 'error'
+                  : lastSolve.status === 'error' || lastSolve.status === 'stale'
                     ? '#fff3cd'
                     : '#e8f5e9',
               fontSize: 13,
@@ -161,11 +167,19 @@ export function ConstraintPanel() {
                 • {c}
               </div>
             ))}
+            {lastSolve.capacity && (
+              <div style={{ marginTop: 4 }}>
+                容量核算：剩余 {lastSolve.capacity.seats} 席 · 实际需求 {lastSolve.capacity.required}
+                人（含临时到场 {lastSolve.capacity.walkins}）· 候选（未回复）
+                {lastSolve.capacity.pendingCandidates} 人 ·{' '}
+                {lastSolve.capacity.pendingFit ? '✅ 候选全部到场也坐得下' : '⚠️ 候选全部到场将超员'}
+              </div>
+            )}
             {lastSolve.assignments && (
               <>
                 <div style={{ marginTop: 4 }}>
-                  偏好总代价：<strong>{(lastSolve.totalPenalty ?? 0).toFixed(2)}</strong>
-                  （软约束被放宽的程度，越低越好）
+                  换桌人数：<strong>{lastSolve.moves ?? 0}</strong>（最少换桌目标） · 偏好总代价：
+                  <strong>{(lastSolve.totalPenalty ?? 0).toFixed(2)}</strong>
                 </div>
                 {(lastSolve.perGuestCost ?? []).filter((c) => c.cost > 0.01).length > 0 && (
                   <details>
@@ -180,10 +194,14 @@ export function ConstraintPanel() {
                       ))}
                   </details>
                 )}
-                <button style={{ marginTop: 6 }} onClick={applySolution}>
-                  应用该方案（可撤销）
-                </button>
+                <div style={{ marginTop: 6, display: 'flex', gap: 6 }}>
+                  <button onClick={applySolution}>应用该方案（可撤销）</button>
+                  <button onClick={dismissResult}>忽略</button>
+                </div>
               </>
+            )}
+            {lastSolve.status === 'stale' && (
+              <div style={{ marginTop: 4 }}>该结果未写入任何状态，不会进入打印。</div>
             )}
           </div>
         )}
@@ -196,8 +214,9 @@ export function ConstraintPanel() {
           {autoSnapshot ? (
             <>
               <div>
-                自动方案（{new Date(autoSnapshot.at).toLocaleTimeString()}，{autoSnapshot.status}）：
-                {autoSnapshot.assignments.length} 人 · 代价 {autoSnapshot.totalPenalty.toFixed(2)}
+                自动方案（{new Date(autoSnapshot.at).toLocaleTimeString()}，{autoSnapshot.status}，基于布局 v
+                {autoSnapshot.layoutVersion}）：{autoSnapshot.assignments.length} 人 · 换桌 {autoSnapshot.moves} · 代价{' '}
+                {autoSnapshot.totalPenalty.toFixed(2)}
               </div>
               <div>
                 与当前方案差异：<strong>{diff}</strong> 个席位不同 · 代价差{' '}
@@ -210,6 +229,9 @@ export function ConstraintPanel() {
           )}
         </div>
       </section>
+
+      <SwapChainPanel />
+      <CateringPanel />
     </div>
   );
 }

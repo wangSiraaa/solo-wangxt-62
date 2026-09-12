@@ -1,8 +1,20 @@
 import { Project, guestLabel } from './types';
 
+export interface PrintGuard {
+  solving: boolean;
+  hasUnconsumedResult: boolean;
+}
+
+/** 打印前置检查：只能来自最新确认布局 */
+export function canPrint(guard: PrintGuard): string | null {
+  if (guard.solving) return '求解进行中，布局未确认，不能打印';
+  if (guard.hasUnconsumedResult) return '存在未处理的最新求解结果：请先「应用」或「忽略」，再打印';
+  return null;
+}
+
 /**
- * 导出桌卡：忌口从独立存储读取（keyed by guestId），与席位无关，
- * 因此换座不会丢失忌口信息。
+ * 导出桌卡：只读取当前已确认布局（project.assignments + layoutVersion）。
+ * 忌口从独立存储读取（keyed by guestId），与席位无关，换座不丢失。
  */
 export function exportPlaceCards(project: Project) {
   const tableById = new Map(project.floor.tables.map((t) => [t.id, t]));
@@ -36,8 +48,10 @@ body{font-family:system-ui,sans-serif;display:flex;flex-wrap:wrap;gap:12px;paddi
 .name{font-size:20px;font-weight:600;margin-bottom:8px}
 .seat{color:#555;margin-bottom:6px}
 .diet{color:#a33;font-size:13px}
+.header{width:100%;color:#666;font-size:12px;border-bottom:1px solid #ccc;padding-bottom:8px}
 @media print{.card{border:1px dashed #999}}
 </style></head><body>
+<div class="header">${escapeHtml(project.name)} · 布局版本 v${project.layoutVersion} · 打印于 ${new Date().toLocaleString()} · 共 ${project.assignments.length} 席</div>
 ${cards}
 </body></html>`;
 

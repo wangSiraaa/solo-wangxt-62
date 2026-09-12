@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useStore } from '../store';
 import { guestLabel, seatKey } from '../types';
 
-const RSVP_LABEL = { confirmed: '已确认', pending: '未回复', declined: '已婉拒' } as const;
+const RSVP_LABEL = { confirmed: '已确认', pending: '未回复', declined: '已婉拒', walkin: '临时到场' } as const;
 
 export function GuestSidebar() {
   const { state, addGuest, updateGuest, removeGuest, setDietary, assignSeat, toggleLock, selectGuest } =
@@ -82,6 +82,7 @@ export function GuestSidebar() {
                     <option value="confirmed">已确认</option>
                     <option value="pending">未回复</option>
                     <option value="declined">已婉拒</option>
+                    <option value="walkin">临时到场</option>
                   </select>
                   <label>
                     <input
@@ -123,7 +124,9 @@ export function GuestSidebar() {
                       <button onClick={() => assignSeat(g.id, null)}>移出席位</button>
                     </>
                   ) : (
-                    g.rsvp === 'confirmed' && <span style={{ color: '#888' }}>点击画布上的空椅子安排入座</span>
+                    (g.rsvp === 'confirmed' || g.rsvp === 'walkin') && (
+                      <span style={{ color: '#888' }}>点击画布上的空椅子安排入座</span>
+                    )
                   )}
                   <button style={{ marginLeft: 'auto', color: '#a00' }} onClick={() => removeGuest(g.id)}>
                     删除

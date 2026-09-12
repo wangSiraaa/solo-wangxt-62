@@ -9,7 +9,6 @@ import React, {
 } from 'react';
 import {
   Assignment,
-  AvoidPair,
   BanquetTable,
   DietaryProfile,
   Guest,
@@ -22,21 +21,32 @@ import {
 import { saveProject } from './db';
 import { seatPosition } from './geometry';
 import { solveSeating } from './solver/solve';
+import { diffCatering } from './catering';
+import { SwapLeg, validateSwapChain } from './swapchain';
+import { bumpLayout, isStaleResult, removeTablesFromProject } from './projectOps';
 
 export interface AutoSnapshot {
   at: number;
   assignments: Assignment[];
   totalPenalty: number;
+  moves: number;
   status: string;
+  layoutVersion: number;
 }
 
 interface State {
   project: Project;
   past: Project[]; // 撤销栈（手工操作）
+  /** 数据版本：任何项目变更 +1，用于过期结果拦截 */
+  version: number;
   autoSnapshot: AutoSnapshot | null;
   lastSolve: SolveResult | null;
+  /** 最新有效结果是否已被消费（应用或忽略）。打印桌卡前必须消费 */
+  resultConsumed: boolean;
   solving: boolean;
   selectedGuestId: string | null;
+  swapError: string | null;
+  lastDiff: string[];
 }
 
 type Action =
@@ -44,37 +54,58 @@ type Action =
   | { type: 'mutate'; fn: (p: Project) => Project; undoable?: boolean }
   | { type: 'undo' }
   | { type: 'setAutoSnapshot'; snap: AutoSnapshot | null }
-  | { type: 'setSolve'; result: SolveResult | null }
+  | { type: 'setSolve'; result: SolveResult | null; consumed?: boolean }
   | { type: 'setSolving'; v: boolean }
-  | { type: 'selectGuest'; id: string | null };
+  | { type: 'selectGuest'; id: string | null }
+  | { type: 'setSwapError'; msg: string | null }
+  | { type: 'setDiff'; lines: string[] };
 
 const UNDO_LIMIT = 50;
 
 function reducer(s: State, a: Action): State {
   switch (a.type) {
     case 'load':
-      return { ...s, project: a.project, past: [], autoSnapshot: null, lastSolve: null };
+      return {
+        ...s,
+        project: a.project,
+        past: [],
+        version: s.version + 1,
+        autoSnapshot: null,
+        lastSolve: null,
+        resultConsumed: true,
+        lastDiff: [],
+      };
     case 'mutate': {
       const undoable = a.undoable !== false;
       const next = a.fn(s.project);
       return {
         ...s,
         project: next,
+        version: s.version + 1,
         past: undoable ? [...s.past.slice(-UNDO_LIMIT + 1), s.project] : s.past,
       };
     }
     case 'undo': {
       if (s.past.length === 0) return s;
-      return { ...s, project: s.past[s.past.length - 1], past: s.past.slice(0, -1) };
+      return {
+        ...s,
+        project: s.past[s.past.length - 1],
+        past: s.past.slice(0, -1),
+        version: s.version + 1,
+      };
     }
     case 'setAutoSnapshot':
       return { ...s, autoSnapshot: a.snap };
     case 'setSolve':
-      return { ...s, lastSolve: a.result };
+      return { ...s, lastSolve: a.result, resultConsumed: a.consumed ?? s.resultConsumed };
     case 'setSolving':
       return { ...s, solving: a.v };
     case 'selectGuest':
       return { ...s, selectedGuestId: a.id };
+    case 'setSwapError':
+      return { ...s, swapError: a.msg };
+    case 'setDiff':
+      return { ...s, lastDiff: a.lines };
   }
 }
 
@@ -86,24 +117,32 @@ interface Store {
   selectGuest: (id: string | null) => void;
   // 宾客
   addGuest: (name: string, opts?: Partial<Guest>) => void;
+  addWalkIn: (name: string) => void;
   updateGuest: (id: string, patch: Partial<Guest>) => void;
   removeGuest: (id: string) => void;
   setDietary: (profile: DietaryProfile) => void;
   // 席位
   assignSeat: (guestId: string, seat: SeatRef | null) => void;
   toggleLock: (guestId: string) => void;
+  /** 锁定所有“已入席且确认不动”的宾客 */
+  lockAllSeated: () => void;
   // 桌
   moveTable: (tableId: string, x: number, y: number) => void;
   addTable: (t: BanquetTable) => void;
-  removeTable: (tableId: string) => void;
+  removeTables: (tableIds: string[]) => void;
   // 约束
   addAvoid: (a: string, b: string, reason: string) => void;
   removeAvoid: (id: string) => void;
   addPreference: (p: Omit<ProximityPreference, 'id'>) => void;
   removePreference: (id: string) => void;
+  // 出菜（单向，不可回滚）
+  serveDish: (dishId: string) => void;
+  // 交换链（原子）
+  applySwapChain: (legs: SwapLeg[]) => boolean;
   // 求解与对比
   runSolver: () => void;
   applySolution: () => void;
+  dismissResult: () => void;
   clearAutoSnapshot: () => void;
 }
 
@@ -119,10 +158,14 @@ export function StoreProvider({
   const [state, dispatch] = useReducer(reducer, {
     project: initial,
     past: [],
+    version: 0,
     autoSnapshot: null,
     lastSolve: null,
+    resultConsumed: true,
     solving: false,
     selectedGuestId: null,
+    swapError: null,
+    lastDiff: [],
   });
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -140,7 +183,6 @@ export function StoreProvider({
   }, []);
 
   const store: Store = useMemo(() => {
-    const p = state.project;
     return {
       state,
       mutate,
@@ -160,11 +202,22 @@ export function StoreProvider({
             familyId: opts.familyId ?? null,
             note: opts.note ?? '',
           };
-          return {
-            ...proj,
-            guests: [...proj.guests, guest],
-            nextGuestSeq: proj.nextGuestSeq + 1,
+          return { ...proj, guests: [...proj.guests, guest], nextGuestSeq: proj.nextGuestSeq + 1 };
+        });
+      },
+      addWalkIn: (name) => {
+        // 临时到场：计入实际需求；沿用稳定编号序列
+        mutate((proj) => {
+          const guest: Guest = {
+            id: `G-${String(proj.nextGuestSeq).padStart(4, '0')}`,
+            displayName: name,
+            nameIndex: 1,
+            rsvp: 'walkin',
+            isChild: false,
+            familyId: null,
+            note: '临时到场',
           };
+          return { ...proj, guests: [...proj.guests, guest], nextGuestSeq: proj.nextGuestSeq + 1 };
         });
       },
       updateGuest: (id, patch) =>
@@ -196,22 +249,16 @@ export function StoreProvider({
           const guest = proj.guests.find((g) => g.id === guestId);
           if (!guest) return proj;
           let assignments = proj.assignments.filter(
-            (a) =>
-              a.guestId !== guestId && (!seat || seatKey(a.seat) !== seatKey(seat)),
+            (a) => a.guestId !== guestId && (!seat || seatKey(a.seat) !== seatKey(seat)),
           );
           if (seat) {
             const prev = proj.assignments.find((a) => a.guestId === guestId);
             assignments = [
               ...assignments,
-              {
-                guestId,
-                seat,
-                locked: prev?.locked ?? false,
-                isChildSeat: guest.isChild,
-              },
+              { guestId, seat, locked: prev?.locked ?? false, isChildSeat: guest.isChild },
             ];
           }
-          return { ...proj, assignments };
+          return bumpLayout(proj, assignments);
         }),
       toggleLock: (guestId) =>
         mutate((proj) => ({
@@ -219,6 +266,11 @@ export function StoreProvider({
           assignments: proj.assignments.map((a) =>
             a.guestId === guestId ? { ...a, locked: !a.locked } : a,
           ),
+        })),
+      lockAllSeated: () =>
+        mutate((proj) => ({
+          ...proj,
+          assignments: proj.assignments.map((a) => ({ ...a, locked: true })),
         })),
 
       moveTable: (tableId, x, y) =>
@@ -236,23 +288,17 @@ export function StoreProvider({
           ...proj,
           floor: { ...proj.floor, tables: [...proj.floor.tables, t] },
         })),
-      removeTable: (tableId) =>
-        mutate((proj) => ({
-          ...proj,
-          floor: {
-            ...proj.floor,
-            tables: proj.floor.tables.filter((t) => t.id !== tableId),
-          },
-          assignments: proj.assignments.filter((a) => a.seat.tableId !== tableId),
-        })),
+      removeTables: (tableIds) => {
+        const before = stateRef.current.project;
+        const after = removeTablesFromProject(before, tableIds);
+        dispatch({ type: 'setDiff', lines: diffCatering(before, after) });
+        mutate(() => after);
+      },
 
       addAvoid: (a, b, reason) =>
         mutate((proj) => ({
           ...proj,
-          avoidPairs: [
-            ...proj.avoidPairs,
-            { id: `AP-${Date.now().toString(36)}`, a, b, reason },
-          ],
+          avoidPairs: [...proj.avoidPairs, { id: `AP-${Date.now().toString(36)}`, a, b, reason }],
         })),
       removeAvoid: (id) =>
         mutate((proj) => ({
@@ -262,10 +308,7 @@ export function StoreProvider({
       addPreference: (pref) =>
         mutate((proj) => ({
           ...proj,
-          preferences: [
-            ...proj.preferences,
-            { ...pref, id: `PR-${Date.now().toString(36)}` },
-          ],
+          preferences: [...proj.preferences, { ...pref, id: `PR-${Date.now().toString(36)}` }],
         })),
       removePreference: (id) =>
         mutate((proj) => ({
@@ -273,18 +316,59 @@ export function StoreProvider({
           preferences: proj.preferences.filter((pr) => pr.id !== id),
         })),
 
-      runSolver: () => {
-        dispatch({ type: 'setSolving', v: true });
+      serveDish: (dishId) =>
+        mutate(
+          (proj) => ({
+            ...proj,
+            catering: proj.catering.map((d) =>
+              // 单向：已出菜不可回滚为未出菜
+              d.id === dishId && d.servedAt === null ? { ...d, servedAt: Date.now() } : d,
+            ),
+          }),
+          false, // 出菜是事实，不进撤销栈
+        ),
+
+      applySwapChain: (legs) => {
         const proj = stateRef.current.project;
+        const v = validateSwapChain(proj, legs);
+        if (!v.ok) {
+          // 任何一步无合法落点：整条链不落地
+          dispatch({ type: 'setSwapError', msg: v.error ?? '链验证失败' });
+          return false;
+        }
+        dispatch({ type: 'setSwapError', msg: null });
+        mutate((p) => bumpLayout(p, v.resulting!));
+        return true;
+      },
+
+      runSolver: () => {
+        const v0 = stateRef.current.version;
+        const proj = stateRef.current.project;
+        dispatch({ type: 'setSolving', v: true });
         solveSeating(
           proj.guests,
           proj.floor.tables,
           proj.assignments,
           proj.avoidPairs,
           proj.preferences,
+          v0,
         ).then((result) => {
           dispatch({ type: 'setSolving', v: false });
-          dispatch({ type: 'setSolve', result });
+          // 过期拦截：求解期间数据版本变化（如新增到场记录）→ 结果作废
+          if (isStaleResult(v0, stateRef.current.version)) {
+            dispatch({
+              type: 'setSolve',
+              result: {
+                type: 'result',
+                status: 'stale',
+                message: `结果已过期并被拦截：求解期间数据已变更（v${v0} → v${stateRef.current.version}），请重新求解`,
+                baseVersion: v0,
+              },
+              consumed: true,
+            });
+            return;
+          }
+          dispatch({ type: 'setSolve', result, consumed: false });
           if (
             (result.status === 'optimal' || result.status === 'feasible') &&
             result.assignments
@@ -295,7 +379,9 @@ export function StoreProvider({
                 at: Date.now(),
                 assignments: result.assignments,
                 totalPenalty: result.totalPenalty ?? 0,
+                moves: result.moves ?? 0,
                 status: result.status,
+                layoutVersion: stateRef.current.project.layoutVersion,
               },
             });
           }
@@ -304,8 +390,16 @@ export function StoreProvider({
 
       applySolution: () => {
         const r = state.lastSolve;
-        if (!r?.assignments) return;
-        mutate((proj) => ({ ...proj, assignments: r.assignments! }));
+        if (!r?.assignments || (r.status !== 'optimal' && r.status !== 'feasible')) return;
+        const before = stateRef.current.project;
+        const after = bumpLayout(before, r.assignments);
+        dispatch({ type: 'setDiff', lines: diffCatering(before, after) });
+        mutate(() => after);
+        dispatch({ type: 'setSolve', result: r, consumed: true });
+      },
+
+      dismissResult: () => {
+        dispatch({ type: 'setSolve', result: state.lastSolve, consumed: true });
       },
 
       clearAutoSnapshot: () => dispatch({ type: 'setAutoSnapshot', snap: null }),

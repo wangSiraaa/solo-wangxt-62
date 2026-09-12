@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "esbuild test/e2e.mts test/geometry.mts --bundle --platform=node --format=esm --external:glpk.js/node --outdir=test/.out --out-extension:.js=.mjs && node test/.out/e2e.mjs && node test/.out/geometry.mjs"
+    "test": "esbuild test/e2e.mts test/geometry.mts test/replan.mts --bundle --platform=node --format=esm --external:glpk.js/node --outdir=test/.out --out-extension:.js=.mjs && node test/.out/e2e.mjs && node test/.out/geometry.mjs && node test/.out/replan.mjs"
   },
   "dependencies": {
     "glpk.js": "^5.0.0",
