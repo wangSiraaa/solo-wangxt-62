@@ -1,0 +1,16 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Generated dependencies and build/test output
+node_modules/
+dist/
+seating-planner/test/.out/
+*.tsbuildinfo
+.playwright-cli/
